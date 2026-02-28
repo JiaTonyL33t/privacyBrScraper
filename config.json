@@ -1,0 +1,12 @@
+{
+    "download_dir": "./content",
+    "ffmpeg_path": "ffmpeg",
+    "db_path": "privacy_users.db",
+    "num_threads": 12,
+    "max_retries": 3,
+    "retry_delay": 2,
+    "rate_limit_delay": 0.3,
+    "scrape_max_pages": 9999,
+    "scrape_threads": 6,
+    "progress_report_interval": 300
+}

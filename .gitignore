@@ -1,0 +1,15 @@
+# Database
+*.db
+
+# Downloaded content
+content/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
