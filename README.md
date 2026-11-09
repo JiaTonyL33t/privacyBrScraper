@@ -2,7 +2,57 @@
 
 Single-file Python script that downloads all your subscribed content from privacy.com.br — timeline posts, images, videos (HLS), and chat/message media.
 
-## Prerequisites
+## Running with Docker (no local install)
+
+Only Docker is required — Python, `requests` and `ffmpeg` live inside the image.
+
+```powershell
+docker compose build                      # once (and again after editing main.py)
+docker compose run --rm scraper pipeline  # or: status, rescan, chat, retry, ...
+```
+
+The project folder is mounted as the container's working directory, so `config.json`, `auth.json`, `privacy_users.db` and `content/` are read and written right here on the host. Keep `config.json` with `"ffmpeg_path": "ffmpeg"` and a relative `download_dir` (e.g. `./content`). To save media elsewhere (e.g. another drive), add a volume such as `- D:/privacy:/media` in `docker-compose.yml` and set `"download_dir": "/media"`.
+
+Fill in `auth.json` as described in step 3 below before running.
+
+### MCP server (drive the tool from an AI assistant)
+
+`mcp_server.py` exposes the scraper as an [MCP](https://modelcontextprotocol.io) server (stdio), running in the same Docker image.
+
+- **Claude Code:** the project's `.mcp.json` registers it automatically — open Claude Code in this folder and approve the `privacy-br-scraper` server. Rebuild the image first (`docker compose build`).
+- **Other clients** (e.g. Claude Desktop): run `docker compose -f <path-to-this-folder>/docker-compose.yml run --rm -T mcp` as the server command.
+
+| Tool | What it does |
+|------|--------------|
+| `start_job(command, creators?)` | Runs `pipeline`, `rescan`, `scrape`, `download`, `retry`, `chat`, `chat-dl` or `sync` in the background, optionally only for some creators. One job at a time. |
+| `wait_for_job(job_id?, max_wait_seconds=240, update_every_seconds=15)` | Follows a job, sending live MCP progress notifications (`downloaded/total`, %, ETA, last log line) every few seconds, and returns when the job ends or the wait expires. The server instructions tell the AI to report progress to the user and call it again until the job finishes. |
+| `job_status(job_id?)`, `list_jobs()`, `stop_job(job_id?)` | Snapshot of a job (progress + log tail), list and stop jobs. Logs go to `logs/`. |
+| `status()` | Per-creator progress table. |
+| `list_creators()` | Followed creators with media / downloaded / remaining counts and skip flag. |
+| `list_failures(kind)` | Contents of `failed_media.tsv` / `failed_chat.tsv`, grouped by reason. |
+| `find_duplicate_files()` | Files with identical content (read-only). |
+| `auth_status()` | JWT expiry and cookie **names** — secret values are never returned. |
+| `update_auth(curl_command? \| jwt_token?, cookie_string?)` | Updates `auth.json`; easiest is pasting a DevTools *Copy as cURL* of any `service.privacy.com.br` request. |
+| `get_skip_users()`, `set_skip_user(name, skip)` | Manage `skip_users` in `config.json`. |
+
+Jobs run inside the MCP server's container, so they stop when the AI client session ends; progress is kept in the database and the next run resumes.
+
+The CLI also accepts `--user NAME` (repeatable) to process only some creators, e.g. `docker compose run --rm scraper pipeline --user SomeCreator`.
+
+### Skipping creators
+
+`config.json` → `"skip_users": ["Privacy"]` — creators listed here (nickname or profile name, case-insensitive) are never scraped or downloaded, including their chat media.
+
+### Failure list
+
+Every download run writes the media that failed, with the reason and link, to a tab-separated file (opens in Excel):
+
+- `failed_media.tsv` — timeline posts (`pipeline`, `download`, `retry`, `rescan`)
+- `failed_chat.tsv` — chat media (`chat`, `chat-dl`)
+
+Columns: `time, source, creator, type, media_id, reason, media_url, profile_url`. Each run replaces the previous list of the same kind, so it always reflects what is still failing.
+
+## Prerequisites (running without Docker)
 
 - **Python 3.10+**
 - **ffmpeg** (required for video downloads — HLS stream merging)
@@ -174,6 +224,9 @@ python main.py pipeline --config /path/to/config.json --auth /path/to/auth.json
 | `scrape_max_pages` | int | `9999` | Max pages per user (9999 = unlimited) |
 | `scrape_threads` | int | `6` | Concurrent threads for scraping |
 | `progress_report_interval` | int | `300` | Seconds between background progress reports |
+| `skip_users` | list | `[]` | Creators (nickname or profile name, case-insensitive) never scraped or downloaded |
+| `failed_log` | string | `"failed_media.tsv"` | Failure list for timeline downloads |
+| `failed_chat_log` | string | `"failed_chat.tsv"` | Failure list for chat downloads |
 
 ### `auth.json`
 

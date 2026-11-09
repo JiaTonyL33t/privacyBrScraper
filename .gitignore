@@ -13,3 +13,13 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Downloaded content (Docker setup)
+data/
+
+# Failure lists / run logs
+failed_*.tsv
+*.log
+logs/
+progress.json
+removed_duplicates.txt

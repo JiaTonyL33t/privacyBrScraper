@@ -1,0 +1,18 @@
+services:
+  scraper:
+    build: .
+    image: privacy-br-scraper
+    # The project folder is the working dir: config.json, auth.json,
+    # privacy_users.db and content/ are read/written here on the host.
+    volumes:
+      - ./:/data
+    stdin_open: true
+    tty: true
+
+  # MCP server (stdio) — started by the AI client, see .mcp.json
+  mcp:
+    image: privacy-br-scraper
+    entrypoint: ["python", "/app/mcp_server.py"]
+    volumes:
+      - ./:/data
+    stdin_open: true
