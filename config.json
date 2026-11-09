@@ -1,5 +1,8 @@
 {
     "download_dir": "./content",
+    "skip_users": ["Privacy"],
+    "failed_log": "failed_media.tsv",
+    "failed_chat_log": "failed_chat.tsv",
     "ffmpeg_path": "ffmpeg",
     "db_path": "privacy_users.db",
     "num_threads": 12,

@@ -37,6 +37,83 @@ import requests
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# HTTP tracking + failure log
+# ═══════════════════════════════════════════════════════════════════════════════
+# Every request goes through http_get/http_post so the last HTTP error of the
+# current thread can be reported when a download fails.
+
+_LAST_ERR = threading.local()
+
+
+def _short_url(url) -> str:
+    return str(url).split("?")[0].rstrip("/").split("/")[-1][:60]
+
+
+def note_error(msg: str):
+    _LAST_ERR.msg = msg
+
+
+def reset_error():
+    _LAST_ERR.msg = None
+
+
+def last_error() -> str:
+    return getattr(_LAST_ERR, "msg", None) or "unknown"
+
+
+def _tracked(fn):
+    def wrapper(url, *args, **kwargs):
+        try:
+            resp = fn(url, *args, **kwargs)
+        except Exception as e:
+            note_error(f"{type(e).__name__} on {_short_url(url)}")
+            raise
+        if resp.status_code >= 400:
+            note_error(f"HTTP {resp.status_code} on {_short_url(url)}")
+        return resp
+    return wrapper
+
+
+http_get = _tracked(requests.get)
+http_post = _tracked(requests.post)
+
+
+class FailureLog:
+    """Tab-separated list of media that failed to download in the current run."""
+    COLUMNS = ["time", "source", "creator", "type", "media_id", "reason",
+               "media_url", "profile_url"]
+
+    def __init__(self):
+        self.path = None
+        self._lock = threading.Lock()
+        self.count = 0
+
+    def start(self, path: str):
+        """Begin a new run: the previous run's file is replaced."""
+        self.path = path
+        if os.path.exists(path):
+            os.remove(path)
+
+    def record(self, **fields):
+        if not self.path:
+            return
+        fields.setdefault("time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        fields.setdefault("reason", last_error())
+        row = "\t".join(str(fields.get(c) or "").replace("\t", " ").replace("\n", " ")
+                        for c in self.COLUMNS)
+        with self._lock:
+            new = not os.path.exists(self.path)
+            with open(self.path, "a", encoding="utf-8") as f:
+                if new:
+                    f.write("\t".join(self.COLUMNS) + "\n")
+                f.write(row + "\n")
+            self.count += 1
+
+
+FAILURES = FailureLog()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Configuration Loader
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -49,6 +126,15 @@ DEFAULT_CONFIG = {
     "progress_report_interval": 300,
     "ffmpeg_path": "ffmpeg",
 }
+
+
+# Creators never scraped/downloaded (matched case-insensitively against
+# nickname or profile_name). Filled from config["skip_users"] in main().
+SKIP_USERS: set = set()
+
+
+def is_skipped(*names) -> bool:
+    return any(n and str(n).strip().lower() in SKIP_USERS for n in names)
 
 
 def load_config(path="config.json") -> dict:
@@ -208,7 +294,8 @@ class Database:
             c.execute("SELECT * FROM users WHERE still_following=1 ORDER BY nickname")
         else:
             c.execute("SELECT * FROM users ORDER BY still_following DESC, nickname")
-        rows = [dict(r) for r in c.fetchall()]
+        rows = [dict(r) for r in c.fetchall()
+                if not is_skipped(r["nickname"], r["profile_name"])]
         conn.close()
         return rows
 
@@ -347,7 +434,14 @@ def sanitize(name: str) -> str:
 
 
 def extract_file_id(url: str) -> Optional[str]:
-    m = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", url, re.I)
+    """The video's file_id is the first path segment of the CDN URL:
+    older videos use a UUID (video.privacy.com.br/<uuid>/hls/...), newer ones a
+    24-hex id (video.privacy.com.br/6aed37cc2403f4122b33270b/hls/...)."""
+    m = re.match(r"https?://[^/]+/([0-9a-f]{24}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/",
+                 url or "", re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", url or "", re.I)
     return m.group(0) if m else None
 
 
@@ -391,7 +485,7 @@ def refresh_jwt_from_cookies(cookie_string: str) -> Optional[str]:
             "Accept-Encoding": "gzip, deflate",
             "Referer": "https://privacy.com.br/",
         }
-        resp = requests.get("https://privacy.com.br/", headers=headers, cookies=cookies, timeout=30)
+        resp = http_get("https://privacy.com.br/", headers=headers, cookies=cookies, timeout=30)
         if resp.status_code != 200:
             return None
         # JWT pattern: standard HS256 header.payload.signature
@@ -434,7 +528,7 @@ def cmd_sync(config: dict, auth: dict):
         url = f"https://service.privacy.com.br/profile/UserFollowing?page={page}&limit={limit}&nickName="
         print(f"  Fetching page {page}...")
         try:
-            resp = requests.get(url, headers=headers, cookies=cookies, timeout=30)
+            resp = http_get(url, headers=headers, cookies=cookies, timeout=30)
             if resp.status_code != 200:
                 print(f"  HTTP {resp.status_code} — stopping")
                 break
@@ -516,7 +610,7 @@ class MediaScraper:
                 return None
             url = f"{self.base_url}/{page}/{limit}/{profile_name}"
             try:
-                resp = requests.get(url, cookies=self.cookies, headers=self.headers)
+                resp = http_get(url, cookies=self.cookies, headers=self.headers)
                 if resp.status_code == 200:
                     items = resp.json().get("items", [])
                     if not items:
@@ -1031,7 +1125,7 @@ class MediaDownloader:
     def _dl_image(self, url, dest, tid):
         for attempt in range(self.max_retries):
             try:
-                resp = requests.get(url, headers=self.cdn_headers, stream=True, timeout=60)
+                resp = http_get(url, headers=self.cdn_headers, stream=True, timeout=60)
                 if resp.status_code == 200:
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     with open(dest, "wb") as f:
@@ -1052,7 +1146,7 @@ class MediaDownloader:
     def _video_token(self, file_id, tid):
         for attempt in range(self.max_retries):
             try:
-                resp = requests.post(
+                resp = http_post(
                     "https://service.privacy.com.br/mediavideotoken/generate",
                     json={"file_id": file_id},
                     cookies=self.cookies,
@@ -1080,7 +1174,7 @@ class MediaDownloader:
         headers = {**self.cdn_headers, "content": token, "x-content-uri": filename}
         for attempt in range(self.max_retries):
             try:
-                resp = requests.get(url, headers=headers, stream=stream, timeout=60)
+                resp = http_get(url, headers=headers, stream=stream, timeout=60)
                 if resp.status_code == 200:
                     return resp
             except Exception:
@@ -1094,6 +1188,7 @@ class MediaDownloader:
     def _dl_video(self, url, dest, tid):
         file_id = extract_file_id(url)
         if not file_id:
+            note_error("could not extract file_id from URL")
             return False
         token = self._video_token(file_id, tid)
         if not token:
@@ -1182,6 +1277,7 @@ class MediaDownloader:
                 segments.append(line)
 
         if not segments:
+            note_error("HLS playlist has no segments")
             return False
 
         tmp = tempfile.mkdtemp(prefix="priv_hls_")
@@ -1240,6 +1336,7 @@ class MediaDownloader:
                 return True
             else:
                 self.log(f"  ffmpeg error: {result.stderr[-200:]}", tid)
+                note_error("ffmpeg failed: " + result.stderr.strip().splitlines()[-1][:150] if result.stderr.strip() else "ffmpeg failed")
                 if os.path.exists(tmp_out):
                     os.remove(tmp_out)
                 return False
@@ -1250,11 +1347,36 @@ class MediaDownloader:
 
     def _process(self, media, folder, nick, tid, idx, total, uidx, utotal):
         if self.token_expired.is_set():
-            return False
+            return False  # run is stopping — not a failure of this item
+        reset_error()
+        ok = self._process_item(media, folder, nick, tid, idx, total, uidx, utotal)
+        if not ok:
+            reason = last_error()
+            self.log(f"[{uidx}/{utotal}] [{idx}/{total}] FAIL {media['media_type']}: "
+                     f"{nick}/{media['media_id']} — {reason}", tid)
+            FAILURES.record(source="timeline", creator=nick, type=media["media_type"],
+                            media_id=media["media_id"], reason=reason,
+                            media_url=media.get("media_url"),
+                            profile_url=self._profile_url(media.get("user_aid"), nick))
+        return ok
+
+    def _profile_url(self, user_aid, nick):
+        try:
+            conn = sqlite3.connect(self.config["db_path"])
+            row = conn.execute("SELECT profile_url FROM users WHERE aid=?", (user_aid,)).fetchone()
+            conn.close()
+            if row and row[0]:
+                return row[0]
+        except Exception:
+            pass
+        return f"https://privacy.com.br/profile/{nick}"
+
+    def _process_item(self, media, folder, nick, tid, idx, total, uidx, utotal):
         mid = media["media_id"]
         mtype = media["media_type"]
         url = media["media_url"]
         if not url:
+            note_error("no media_url in database")
             return False
 
         ext = {"photo": ".jpg", "video": ".mp4", "audio": ".mp3"}.get(mtype, "")
@@ -1506,7 +1628,8 @@ def cmd_retry(config: dict, auth: dict):
     ''').fetchall()
     conn.close()
 
-    items = [dict(r) for r in rows]
+    items = [dict(r) for r in rows
+             if not is_skipped(r["nickname"], r["profile_name"])]
     if not items:
         print("  Nothing to retry — all downloadable items are done!")
         return
@@ -1617,7 +1740,7 @@ def cmd_chat(config: dict, auth: dict):
     rooms = []
     page = 1
     while True:
-        resp = requests.get(
+        resp = http_get(
             f"{CHAT_API}/rooms",
             headers=headers,
             params={"page": page, "filter": "all", "sort": "newest"},
@@ -1672,6 +1795,9 @@ def cmd_chat(config: dict, auth: dict):
         rid = r["roomId"]
         recip = r.get("recipient", {})
         name = recip.get("name", recip.get("profileName", "Unknown"))
+        if is_skipped(name, recip.get("profileName")):
+            print(f"  [{idx}/{len(rooms)}] {name}: skipped (skip_users)")
+            continue
 
         # Paginate media using minorSentAt cursor
         room_items = []
@@ -1681,7 +1807,7 @@ def cmd_chat(config: dict, auth: dict):
             if minor_sent_at:
                 params["minorSentAt"] = minor_sent_at
 
-            resp = requests.get(
+            resp = http_get(
                 f"{CHAT_API}/medias",
                 headers=headers,
                 params=params,
@@ -1828,7 +1954,7 @@ def _chat_download(config: dict, auth: dict, db: Database = None):
         ORDER BY cr.recipient_name, cm.media_type
     ''').fetchall()
     conn.close()
-    items = [dict(r) for r in rows]
+    items = [dict(r) for r in rows if not is_skipped(r["recipient_name"])]
 
     if not items:
         print("  Nothing to download — all chat media is done!")
@@ -1861,7 +1987,7 @@ def _chat_download(config: dict, auth: dict, db: Database = None):
         url = f"{MEDIA_API}/{media_type}/chat/{media_id}?redirect=true"
         for attempt in range(max_retries):
             try:
-                resp = requests.get(url, headers=api_headers, allow_redirects=True,
+                resp = http_get(url, headers=api_headers, allow_redirects=True,
                                     stream=True, timeout=30)
                 if resp.status_code == 200:
                     return resp  # Return the response with CDN content
@@ -1929,7 +2055,7 @@ def _chat_download(config: dict, auth: dict, db: Database = None):
         hls_url = None
         for attempt in range(max_retries):
             try:
-                resp = requests.get(url, headers=api_headers,
+                resp = http_get(url, headers=api_headers,
                                     allow_redirects=False, timeout=30)
                 if resp.status_code in (301, 302, 307, 308):
                     hls_url = resp.headers.get("Location", "")
@@ -1966,7 +2092,7 @@ def _chat_download(config: dict, auth: dict, db: Database = None):
         token = None
         for attempt in range(max_retries):
             try:
-                tr = requests.post(
+                tr = http_post(
                     "https://service.privacy.com.br/mediavideotoken/generate",
                     json={"file_id": file_id},
                     cookies=cookies,
@@ -1995,7 +2121,7 @@ def _chat_download(config: dict, auth: dict, db: Database = None):
         m3u8_resp = None
         for attempt in range(max_retries):
             try:
-                m3u8_resp = requests.get(hls_url, headers=hls_headers, timeout=30)
+                m3u8_resp = http_get(hls_url, headers=hls_headers, timeout=30)
                 if m3u8_resp.status_code == 200:
                     break
                 m3u8_resp = None
@@ -2057,7 +2183,10 @@ def _chat_download(config: dict, auth: dict, db: Database = None):
             ts = datetime.now().strftime("%H:%M:%S")
             print(f"  [{ts}] [{idx}/{total}] DL {mtype}: {name}/{fname}", flush=True)
 
+        reset_error()
         ok = False
+        if mtype not in ("image", "gif", "video", "audio"):
+            note_error(f"unsupported media type '{mtype}'")
         if mtype in ("image", "gif"):
             ok = dl_chat_image(mid, dest)
         elif mtype == "video":
@@ -2078,12 +2207,21 @@ def _chat_download(config: dict, auth: dict, db: Database = None):
             with print_lock:
                 ts = datetime.now().strftime("%H:%M:%S")
                 print(f"  [{ts}] [{idx}/{total}] OK {mtype}: {name}/{fname} ({fmt_size(sz)})", flush=True)
-        else:
+        elif not token_expired.is_set():
+            reason = last_error()
             with stats_lock:
                 stats["fail"] += 1
             with print_lock:
                 ts = datetime.now().strftime("%H:%M:%S")
-                print(f"  [{ts}] [{idx}/{total}] FAIL {mtype}: {name}/{fname}", flush=True)
+                print(f"  [{ts}] [{idx}/{total}] FAIL {mtype}: {name}/{fname} — {reason}", flush=True)
+            api_type = "image" if mtype == "gif" else mtype
+            FAILURES.record(source="chat", creator=name, type=mtype, media_id=mid,
+                            reason=reason,
+                            media_url=f"{MEDIA_API}/{api_type}/chat/{mid}?redirect=true",
+                            profile_url=f"https://privacy.com.br/chat/{item.get('room_id', '')}")
+        else:
+            with stats_lock:
+                stats["fail"] += 1
         return ok
 
     start = time.time()
@@ -2125,7 +2263,7 @@ def _dl_chat_hls(master, base_url, token, dest, cdn_headers,
         headers = {**cdn_headers, "content": token, "x-content-uri": filename}
         for attempt in range(max_retries):
             try:
-                resp = requests.get(url, headers=headers, stream=stream, timeout=60)
+                resp = http_get(url, headers=headers, stream=stream, timeout=60)
                 if resp.status_code == 200:
                     return resp
             except Exception:
@@ -2164,6 +2302,7 @@ def _dl_chat_hls(master, base_url, token, dest, cdn_headers,
             segments.append(line)
 
     if not segments:
+        note_error("HLS playlist has no segments")
         return False
 
     tmp = tempfile.mkdtemp(prefix="priv_chat_hls_")
@@ -2337,6 +2476,16 @@ def main():
     config = load_config(args.config)
     auth = load_auth(args.auth)
 
+    SKIP_USERS.update(str(n).strip().lower() for n in config.get("skip_users", []))
+    if SKIP_USERS:
+        print(f"[CONFIG] Skipping users: {', '.join(sorted(SKIP_USERS))}")
+
+    # Failure list for this run (replaces the previous run's list of the same kind)
+    if args.command in ("download", "retry", "rescan", "pipeline", "all"):
+        FAILURES.start(config.get("failed_log", "failed_media.tsv"))
+    elif args.command in ("chat", "chat-dl"):
+        FAILURES.start(config.get("failed_chat_log", "failed_chat.tsv"))
+
     cmds = {
         "sync": cmd_sync,
         "scrape": cmd_scrape,
@@ -2353,6 +2502,9 @@ def main():
         cmd_pipeline(config, auth)
     else:
         cmds[args.command](config, auth)
+
+    if FAILURES.count:
+        print(f"\n[FAILURES] {FAILURES.count} media failed — see {FAILURES.path}")
 
 
 if __name__ == "__main__":
