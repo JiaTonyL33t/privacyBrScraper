@@ -131,10 +131,15 @@ DEFAULT_CONFIG = {
 # Creators never scraped/downloaded (matched case-insensitively against
 # nickname or profile_name). Filled from config["skip_users"] in main().
 SKIP_USERS: set = set()
+# When non-empty (--user), only these creators are processed.
+ONLY_USERS: set = set()
 
 
 def is_skipped(*names) -> bool:
-    return any(n and str(n).strip().lower() in SKIP_USERS for n in names)
+    keys = {str(n).strip().lower() for n in names if n}
+    if keys & SKIP_USERS:
+        return True
+    return bool(ONLY_USERS) and not (keys & ONLY_USERS)
 
 
 def load_config(path="config.json") -> dict:
@@ -1413,6 +1418,21 @@ class MediaDownloader:
             else:
                 self._stat("videos_fail")
             return ok
+        elif mtype == "audio":
+            # Audio is a direct .mp3 URL on the CDN — a plain GET is enough.
+            # Counted with videos (skips of non-photos already go there).
+            with self._stats_lock:
+                self._thread_status[tid] = f"DL audio: {nick}/{fname}"
+            self.log(f"{tag} DL audio: {nick}/{fname}", tid)
+            ok = self._dl_image(url, dest, tid)
+            if ok:
+                sz = os.path.getsize(dest)
+                self.log(f"{tag} OK audio: {nick}/{fname} ({fmt_size(sz)})", tid)
+                self._stat("videos_dl")
+            else:
+                self._stat("videos_fail")
+            return ok
+        note_error(f"unsupported media type: {mtype}")
         return False
 
     # ── Process all items for one user ────────────────────────────────────
@@ -2472,6 +2492,8 @@ def main():
                         help="Action to perform")
     parser.add_argument("--config", default="config.json", help="Path to config.json")
     parser.add_argument("--auth", default="auth.json", help="Path to auth.json")
+    parser.add_argument("--user", action="append", default=[], metavar="NAME",
+                        help="Only process this creator (nickname or profile name). Repeatable.")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -2480,6 +2502,9 @@ def main():
     SKIP_USERS.update(str(n).strip().lower() for n in config.get("skip_users", []))
     if SKIP_USERS:
         print(f"[CONFIG] Skipping users: {', '.join(sorted(SKIP_USERS))}")
+    ONLY_USERS.update(str(n).strip().lower() for n in args.user)
+    if ONLY_USERS:
+        print(f"[CONFIG] Only users: {', '.join(sorted(ONLY_USERS))}")
 
     # Failure list for this run (replaces the previous run's list of the same kind)
     if args.command in ("download", "retry", "rescan", "pipeline", "all"):

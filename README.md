@@ -15,6 +15,30 @@ The project folder is mounted as the container's working directory, so `config.j
 
 Fill in `auth.json` as described in step 3 below before running.
 
+### MCP server (drive the tool from an AI assistant)
+
+`mcp_server.py` exposes the scraper as an [MCP](https://modelcontextprotocol.io) server (stdio), running in the same Docker image.
+
+- **Claude Code:** the project's `.mcp.json` registers it automatically — open Claude Code in this folder and approve the `privacy-br-scraper` server. Rebuild the image first (`docker compose build`).
+- **Other clients** (e.g. Claude Desktop): run `docker compose -f <path-to-this-folder>/docker-compose.yml run --rm -T mcp` as the server command.
+
+| Tool | What it does |
+|------|--------------|
+| `start_job(command, creators?)` | Runs `pipeline`, `rescan`, `scrape`, `download`, `retry`, `chat`, `chat-dl` or `sync` in the background, optionally only for some creators. One job at a time. |
+| `wait_for_job(job_id?, max_wait_seconds=240, update_every_seconds=15)` | Follows a job, sending live MCP progress notifications (`downloaded/total`, %, ETA, last log line) every few seconds, and returns when the job ends or the wait expires. The server instructions tell the AI to report progress to the user and call it again until the job finishes. |
+| `job_status(job_id?)`, `list_jobs()`, `stop_job(job_id?)` | Snapshot of a job (progress + log tail), list and stop jobs. Logs go to `logs/`. |
+| `status()` | Per-creator progress table. |
+| `list_creators()` | Followed creators with media / downloaded / remaining counts and skip flag. |
+| `list_failures(kind)` | Contents of `failed_media.tsv` / `failed_chat.tsv`, grouped by reason. |
+| `find_duplicate_files()` | Files with identical content (read-only). |
+| `auth_status()` | JWT expiry and cookie **names** — secret values are never returned. |
+| `update_auth(curl_command? \| jwt_token?, cookie_string?)` | Updates `auth.json`; easiest is pasting a DevTools *Copy as cURL* of any `service.privacy.com.br` request. |
+| `get_skip_users()`, `set_skip_user(name, skip)` | Manage `skip_users` in `config.json`. |
+
+Jobs run inside the MCP server's container, so they stop when the AI client session ends; progress is kept in the database and the next run resumes.
+
+The CLI also accepts `--user NAME` (repeatable) to process only some creators, e.g. `docker compose run --rm scraper pipeline --user SomeCreator`.
+
 ### Skipping creators
 
 `config.json` → `"skip_users": ["Privacy"]` — creators listed here (nickname or profile name, case-insensitive) are never scraped or downloaded, including their chat media.

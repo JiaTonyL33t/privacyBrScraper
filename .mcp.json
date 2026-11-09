@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "privacy-br-scraper": {
+      "command": "docker",
+      "args": ["compose", "run", "--rm", "-T", "--quiet-pull", "mcp"]
+    }
+  }
+}
