@@ -2,7 +2,33 @@
 
 Single-file Python script that downloads all your subscribed content from privacy.com.br — timeline posts, images, videos (HLS), and chat/message media.
 
-## Prerequisites
+## Running with Docker (no local install)
+
+Only Docker is required — Python, `requests` and `ffmpeg` live inside the image.
+
+```powershell
+docker compose build                      # once (and again after editing main.py)
+docker compose run --rm scraper pipeline  # or: status, rescan, chat, retry, ...
+```
+
+The project folder is mounted as the container's working directory, so `config.json`, `auth.json`, `privacy_users.db` and `content/` are read and written right here on the host. Keep `config.json` with `"ffmpeg_path": "ffmpeg"` and a relative `download_dir` (e.g. `./content`). To save media elsewhere (e.g. another drive), add a volume such as `- D:/privacy:/media` in `docker-compose.yml` and set `"download_dir": "/media"`.
+
+Fill in `auth.json` as described in step 3 below before running.
+
+### Skipping creators
+
+`config.json` → `"skip_users": ["Privacy"]` — creators listed here (nickname or profile name, case-insensitive) are never scraped or downloaded, including their chat media.
+
+### Failure list
+
+Every download run writes the media that failed, with the reason and link, to a tab-separated file (opens in Excel):
+
+- `failed_media.tsv` — timeline posts (`pipeline`, `download`, `retry`, `rescan`)
+- `failed_chat.tsv` — chat media (`chat`, `chat-dl`)
+
+Columns: `time, source, creator, type, media_id, reason, media_url, profile_url`. Each run replaces the previous list of the same kind, so it always reflects what is still failing.
+
+## Prerequisites (running without Docker)
 
 - **Python 3.10+**
 - **ffmpeg** (required for video downloads — HLS stream merging)
@@ -174,6 +200,9 @@ python main.py pipeline --config /path/to/config.json --auth /path/to/auth.json
 | `scrape_max_pages` | int | `9999` | Max pages per user (9999 = unlimited) |
 | `scrape_threads` | int | `6` | Concurrent threads for scraping |
 | `progress_report_interval` | int | `300` | Seconds between background progress reports |
+| `skip_users` | list | `[]` | Creators (nickname or profile name, case-insensitive) never scraped or downloaded |
+| `failed_log` | string | `"failed_media.tsv"` | Failure list for timeline downloads |
+| `failed_chat_log` | string | `"failed_chat.tsv"` | Failure list for chat downloads |
 
 ### `auth.json`
 
