@@ -608,7 +608,8 @@ class MediaScraper:
         while page < max_pages:
             if self.token_expired.is_set():
                 return None
-            url = f"{self.base_url}/{page}/{limit}/{profile_name}"
+            # The API's first path parameter is an item offset, not a page index
+            url = f"{self.base_url}/{page * limit}/{limit}/{profile_name}"
             try:
                 resp = http_get(url, cookies=self.cookies, headers=self.headers)
                 if resp.status_code == 200:
